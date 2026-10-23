@@ -144,6 +144,13 @@ def clip(text):
     return copy_text(text)
 
 
+def copy_snippet(store, snippet):
+    tool = clip(snippet.command)
+    if tool:
+        store.touch(snippet.id)
+    return tool
+
+
 class UI:
     def __init__(self, screen, store):
         self.s = screen; self.store = store; self.query = ""; self.rows = []; self.cursor = 0; self.offset = 0; self.toast = ""; self.toast_until = 0
@@ -254,7 +261,7 @@ class UI:
                 sn = self.rows[self.cursor]
                 if self.confirm(f"Delete '{sn.title}'?"): self.store.delete(sn.id); self.cursor = max(0, self.cursor - 1); self.toast_msg("snippet deleted")
             elif c == ord("c") and self.rows:
-                sn = self.rows[self.cursor]; tool = clip(sn.command); self.store.touch(sn.id); self.toast_msg("copied via " + tool if tool else "clipboard tool not found")
+                sn = self.rows[self.cursor]; tool = copy_snippet(self.store, sn); self.toast_msg("copied via " + tool if tool else "clipboard tool not found")
             elif c == ord("x") and self.rows:
                 sn = self.rows[self.cursor]
                 if self.confirm("Run command? " + sn.command) and (sn.safety != "dangerous" or self.confirm("DANGEROUS command. Run anyway?")):

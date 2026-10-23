@@ -1,11 +1,12 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from termindex import Store, SEED
+from termindex import Store, SEED, copy_snippet
 
 
 class StoreTests(unittest.TestCase):
@@ -42,6 +43,16 @@ class StoreTests(unittest.TestCase):
         before = self.store.count()
         with self.assertRaises(ValueError): self.store.import_json(path)
         self.assertEqual(self.store.count(), before)
+
+    def test_copy_only_counts_successful_clipboard_writes(self):
+        snippet = self.store.all()[0]
+        with patch("termindex.clip", return_value=None):
+            self.assertIsNone(copy_snippet(self.store, snippet))
+        self.assertEqual(self.store.get(snippet.id).used, 0)
+
+        with patch("termindex.clip", return_value="wl-copy"):
+            self.assertEqual(copy_snippet(self.store, snippet), "wl-copy")
+        self.assertEqual(self.store.get(snippet.id).used, 1)
 
 
 if __name__ == "__main__": unittest.main()
