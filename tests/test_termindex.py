@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from termindex import Settings, Store, SEED, copy_snippet
+from termindex import ONION_SECRET_HEADER, OnionMaterial, Settings, Store, SEED, copy_snippet, onion_address, save_onion_material
 
 
 class StoreTests(unittest.TestCase):
@@ -68,6 +69,20 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(Settings.load(path), settings)
         path.write_text("not json")
         self.assertEqual(Settings.load(path), Settings())
+
+    def test_onion_address_encoding_and_key_export(self):
+        public_key = bytes(range(32))
+        address = onion_address(public_key)
+        self.assertEqual(len(address), 62)
+        self.assertTrue(address.endswith(".onion"))
+        material = OnionMaterial(address, b"s" * 32, public_key, 1, 0.1)
+        target = save_onion_material(material, Path(self.tmp.name) / "onion")
+        self.assertEqual((target / "hostname").read_text(), address + "\n")
+        self.assertEqual((target / "hs_ed25519_secret_key").stat().st_mode & 0o777, 0o600)
+        expanded = bytearray(hashlib.sha512(b"s" * 32).digest())
+        expanded[0] &= 248; expanded[31] &= 63; expanded[31] |= 64
+        self.assertEqual((target / "hs_ed25519_secret_key").read_bytes(), ONION_SECRET_HEADER + bytes(expanded))
+        with self.assertRaises(FileExistsError): save_onion_material(material, target)
 
 
 if __name__ == "__main__": unittest.main()

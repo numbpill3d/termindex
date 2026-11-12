@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import curses
+import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from dataclasses import dataclass
@@ -19,6 +23,9 @@ from pathlib import Path
 APP = "termindex"
 DEFAULT_DB = Path.home() / ".local/share/termindex/snippets.db"
 DEFAULT_SETTINGS = Path.home() / ".config/termindex/settings.json"
+ONION_SECRET_HEADER = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
+ONION_PUBLIC_HEADER = b"== ed25519v1-public: type0 ==\x00\x00\x00"
+ONION_PREFIX = re.compile(r"^[a-z2-7]*$")
 
 SEED = [
     ("Check failed systemd units", "systemd", "diagnostics", "systemctl --failed --no-pager", "Quick health check after installing a service.", "systemd,health", "safe"),
@@ -72,6 +79,77 @@ class Settings:
             "show_descriptions": self.show_descriptions,
         }, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, target)
+
+
+@dataclass
+class OnionMaterial:
+    address: str
+    seed: bytes
+    public_key: bytes
+    attempts: int
+    elapsed: float
+
+
+class OnionGenerationCancelled(Exception):
+    pass
+
+
+def onion_address(public_key: bytes) -> str:
+    """Encode a Tor v3 onion address from its 32-byte Ed25519 public key."""
+    if len(public_key) != 32: raise ValueError("Ed25519 public key must be 32 bytes")
+    version = b"\x03"
+    checksum = hashlib.sha3_256(b".onion checksum" + public_key + version).digest()[:2]
+    return base64.b32encode(public_key + checksum + version).decode("ascii").lower() + ".onion"
+
+
+def generate_onion(prefix="", progress=None) -> OnionMaterial:
+    """Generate a v3 identity using OpenSSL, optionally searching a vanity prefix."""
+    prefix = prefix.lower().strip()
+    if not ONION_PREFIX.fullmatch(prefix): raise ValueError("prefix must use a-z and 2-7 only")
+    if len(prefix) > 2: raise ValueError("prefix is limited to 2 characters")
+    if not shutil.which("openssl"): raise RuntimeError("openssl is required for onion identity generation")
+    started = time.monotonic(); attempts = 0
+    with tempfile.TemporaryDirectory(prefix="termindex-onion-") as work:
+        key_der = Path(work) / "key.der"; public_der = Path(work) / "public.der"
+        while attempts < 10_000:
+            attempts += 1
+            try:
+                subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-outform", "DER", "-out", str(key_der)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
+                subprocess.run(["openssl", "pkey", "-inform", "DER", "-in", str(key_der), "-pubout", "-outform", "DER", "-out", str(public_der)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
+            except (OSError, subprocess.SubprocessError) as error:
+                raise RuntimeError("OpenSSL could not generate an Ed25519 key") from error
+            private_der = key_der.read_bytes(); public_der_bytes = public_der.read_bytes()
+            seed, public_key = private_der[-32:], public_der_bytes[-32:]
+            address = onion_address(public_key)
+            if progress and (attempts == 1 or attempts % 8 == 0 or address[0:-6].startswith(prefix)):
+                progress(attempts, time.monotonic() - started)
+            if address[:-6].startswith(prefix):
+                return OnionMaterial(address, seed, public_key, attempts, time.monotonic() - started)
+        raise TimeoutError("no matching onion address found within 10,000 attempts")
+
+
+def save_onion_material(material: OnionMaterial, directory: str | Path) -> Path:
+    target = Path(directory).expanduser()
+    if target.exists() and any(target.iterdir()): raise FileExistsError("output directory is not empty")
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(target, 0o700)
+    expanded = bytearray(hashlib.sha512(material.seed).digest())
+    expanded[0] &= 248
+    expanded[31] &= 63
+    expanded[31] |= 64
+    files = {
+        "hostname": (material.address + "\n").encode(),
+        "hs_ed25519_public_key": ONION_PUBLIC_HEADER + material.public_key,
+        "hs_ed25519_secret_key": ONION_SECRET_HEADER + bytes(expanded),
+    }
+    for name, contents in files.items():
+        destination = target / name
+        with tempfile.NamedTemporaryFile(dir=target, prefix=f".{name}.", delete=False) as temporary:
+            temporary.write(contents); temporary.flush(); os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, destination)
+    return target
 
 
 def db_path(value: str | None) -> Path:
@@ -353,11 +431,55 @@ class UI:
         self.s.refresh(); self.s.timeout(-1); c = self.s.getch(); self.s.timeout(180); return c in (ord("y"), ord("Y"))
 
     def help(self):
-        h, w = self.s.getmaxyx(); width = min(76, w - 4); height = 15; x = (w - width) // 2; y = max(1, (h - height) // 2)
+        h, w = self.s.getmaxyx(); width = min(76, w - 4); height = 16; x = (w - width) // 2; y = max(1, (h - height) // 2)
         self.s.erase(); self.box(y, x, height, width, "KEYBOARD GUIDE", curses.color_pair(3))
-        lines = ("Move        ↑ ↓ or j k", "Search      /", "New         n", "Edit        e", "Copy        c", "Run         x  (always asks first)", "Delete      d  (asks first)", "Settings    s", "Import      i", "Export      o", "Quit        q or Esc", "", "Press any key to return")
+        lines = ("Move        ↑ ↓ or j k", "Search      /", "New         n", "Edit        e", "Copy        c", "Run         x  (always asks first)", "Delete      d  (asks first)", "Onion       v  generate v3 identity", "Settings    s", "Import      i", "Export      o", "Quit        q or Esc", "", "Press any key to return")
         for row, line in enumerate(lines): self.add(y + 2 + row, x + 4, line, width - 8, curses.color_pair(1) | (curses.A_DIM if row == len(lines) - 1 else 0))
         self.s.refresh(); self.s.timeout(-1); self.s.getch(); self.s.timeout(180)
+
+    def onion_progress(self, prefix, attempts, elapsed):
+        h, w = self.s.getmaxyx(); width, height = min(78, w - 4), 12; x, y = (w - width) // 2, max(1, (h - height) // 2)
+        spinner = "|/-\\"[(attempts // 8) % 4]
+        self.s.erase(); self.box(y, x, height, width, "ONION IDENTITY", curses.color_pair(3))
+        self.add(y + 2, x + 4, f"{spinner} searching v3 addresses", width - 8, curses.color_pair(3) | curses.A_BOLD)
+        self.add(y + 4, x + 4, f"prefix      {prefix or '(random)'}", width - 8, curses.color_pair(1))
+        self.add(y + 5, x + 4, f"attempts    {attempts:,}", width - 8, curses.color_pair(1))
+        self.add(y + 6, x + 4, f"elapsed     {elapsed:.1f}s", width - 8, curses.color_pair(1))
+        self.add(y + 8, x + 4, "private key remains in memory until you choose a save path", width - 8, curses.color_pair(1) | curses.A_DIM)
+        self.add(y + height - 2, x + 2, "Esc cancel   ·   never share hs_ed25519_secret_key", width - 4, curses.color_pair(5))
+        self.s.refresh(); self.s.timeout(0)
+        key = self.s.getch(); self.s.timeout(180)
+        if key in (27, ord("q")): raise OnionGenerationCancelled
+
+    def onion_result(self, material, directory):
+        h, w = self.s.getmaxyx(); width, height = min(92, w - 4), 13; x, y = (w - width) // 2, max(1, (h - height) // 2)
+        self.s.erase(); self.box(y, x, height, width, "ONION IDENTITY READY", curses.color_pair(3))
+        self.add(y + 2, x + 4, "ADDRESS", width - 8, curses.color_pair(3) | curses.A_BOLD)
+        self.add(y + 3, x + 4, material.address, width - 8, curses.color_pair(1) | curses.A_BOLD)
+        self.add(y + 5, x + 4, f"saved to   {directory}", width - 8, curses.color_pair(1))
+        self.add(y + 6, x + 4, f"search     {material.attempts:,} attempts · {material.elapsed:.1f}s", width - 8, curses.color_pair(1))
+        self.add(y + 8, x + 4, "The secret key is never displayed. Back up this directory securely.", width - 8, curses.color_pair(5))
+        self.add(y + height - 2, x + 2, "Press any key to return", width - 4, curses.color_pair(4))
+        self.s.refresh(); self.s.timeout(-1); self.s.getch(); self.s.timeout(180)
+
+    def onion_identity(self):
+        prefix = self.prompt("Vanity prefix (a-z, 2-7; blank for random)", "", allow_empty=True)
+        if prefix is None: return
+        prefix = prefix.lower().strip()
+        if not ONION_PREFIX.fullmatch(prefix) or len(prefix) > 2:
+            self.toast_msg("invalid prefix: use up to 2 chars a-z or 2-7"); return
+        default_path = str(Path("~/.local/share/termindex/onion-services") / (prefix or "service"))
+        directory = self.prompt("Save key directory", default_path)
+        if directory is None: return
+        try:
+            material = generate_onion(prefix, lambda attempts, elapsed: self.onion_progress(prefix, attempts, elapsed))
+            if not self.confirm(f"Save {material.address} to {directory}?"): self.toast_msg("identity discarded"); return
+            saved = save_onion_material(material, directory)
+            self.onion_result(material, saved)
+        except OnionGenerationCancelled:
+            self.toast_msg("onion search cancelled; no key was saved")
+        except (FileExistsError, OSError, RuntimeError, TimeoutError) as error:
+            self.toast_msg("onion generation failed: " + str(error)[:48])
 
     def settings_screen(self):
         options = [("Startup animation", "startup_animation"), ("Detail descriptions", "show_descriptions")]
@@ -414,6 +536,8 @@ class UI:
                         curses.reset_prog_mode(); self.s = curses.initscr(); self.setup_terminal()
             elif c == ord("?"):
                 self.help()
+            elif c == ord("v"):
+                self.onion_identity()
             elif c == ord("s"):
                 self.settings_screen()
             elif c == ord("i"):
