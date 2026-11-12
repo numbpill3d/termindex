@@ -15,6 +15,15 @@ cd /home/scorn/termindex
 ./termindex
 ```
 
+For a checkout you use regularly, make the launcher available as `termindex` from any directory:
+
+```bash
+ln -sfn "$PWD/termindex" ~/.local/bin/termindex
+termindex
+```
+
+The launcher resolves the repository path automatically, so the symlink can live outside the checkout. Termindex has no third-party Python dependencies.
+
 The database lives at `~/.local/share/termindex/snippets.db` by default. Use `--db PATH` to point it somewhere else.
 
 ## Keys
@@ -39,7 +48,6 @@ For maintenance or scripting:
 ## Design
 
 - SQLite-backed, local-first storage
-- no third-party Python dependencies
 - JSON import/export for backups and portability
 - `wl-copy`, `xclip`, or `xsel` clipboard support when installed
 - seeded with a small set of practical examples on first launch
