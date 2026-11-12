@@ -6,6 +6,8 @@
 
 ![termindex TUI preview](assets/termindex.png)
 
+![termindex settings preview](assets/termindex-settings.png)
+
 ## Run
 
 ```bash
@@ -17,7 +19,11 @@ The database lives at `~/.local/share/termindex/snippets.db` by default. Use `--
 
 ## Keys
 
-`j/k` or arrows move · `/` search · `n` new · `e` edit · `d` delete · `c` copy · `x` run · `i` import · `o` export · `q` quit
+`j/k` or arrows move · `/` search · `n` new · `e` edit · `d` delete · `c` copy · `x` run · `s` settings · `?` help · `i` import · `o` export · `q` quit
+
+Search and form fields support left/right, Home/End, Backspace, and Ctrl-U. Press Esc to cancel a prompt. The interface is designed for terminals at least 64 columns by 18 rows.
+
+Settings are saved at `~/.config/termindex/settings.json`. The settings screen controls the short ASCII startup animation and whether descriptions appear in the detail pane. Run confirmations stay enabled, including the extra warning for dangerous commands.
 
 Commands are never run without a confirmation dialog. Snippets marked `dangerous` get a second warning.
 

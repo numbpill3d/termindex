@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from termindex import Store, SEED, copy_snippet
+from termindex import Settings, Store, SEED, copy_snippet
 
 
 class StoreTests(unittest.TestCase):
@@ -44,6 +44,13 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.store.import_json(path)
         self.assertEqual(self.store.count(), before)
 
+    def test_import_rejects_null_required_fields_without_partial_rows(self):
+        path = Path(self.tmp.name) / "null.json"
+        path.write_text(json.dumps([{"title": None, "command": "echo hi"}]))
+        before = self.store.count()
+        with self.assertRaises(ValueError): self.store.import_json(path)
+        self.assertEqual(self.store.count(), before)
+
     def test_copy_only_counts_successful_clipboard_writes(self):
         snippet = self.store.all()[0]
         with patch("termindex.clip", return_value=None):
@@ -53,6 +60,14 @@ class StoreTests(unittest.TestCase):
         with patch("termindex.clip", return_value="wl-copy"):
             self.assertEqual(copy_snippet(self.store, snippet), "wl-copy")
         self.assertEqual(self.store.get(snippet.id).used, 1)
+
+    def test_settings_roundtrip_and_invalid_file_fallback(self):
+        path = Path(self.tmp.name) / "settings.json"
+        settings = Settings(startup_animation=False, show_descriptions=False)
+        settings.save(path)
+        self.assertEqual(Settings.load(path), settings)
+        path.write_text("not json")
+        self.assertEqual(Settings.load(path), Settings())
 
 
 if __name__ == "__main__": unittest.main()
